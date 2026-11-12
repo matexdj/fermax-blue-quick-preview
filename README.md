@@ -1,5 +1,7 @@
 # Fermax Blue – Quick Preview (fork by matexdj)
 
+> **Installing Quick Preview?** Follow the [fork installation and rollback guide](https://github.com/matexdj/fermax-blue-quick-preview/blob/quick-preview-v1.0.0/docs/quick-preview.md). The Marketplace and HACS instructions below apply to the upstream Fermax Blue integration.
+
 If you’d like to support the work on this fork, you can [☕ Buy matexdj a coffee](https://buymeacoffee.com/matexdj).
 
 [![Marketplace](https://img.shields.io/badge/Marketplace-Default-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/)
