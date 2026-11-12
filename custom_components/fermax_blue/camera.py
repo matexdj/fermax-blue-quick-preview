@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
-import logging
 
 from aiohttp import web
 from homeassistant.components.camera import Camera, CameraEntityFeature
@@ -19,8 +18,6 @@ from .coordinator import FermaxBlueConfigEntry, FermaxBlueCoordinator
 from .entity import FermaxBlueEntity
 from .streaming import draw_wake_progress
 from .webrtc_bridge import webrtc_stream_source
-
-_LOGGER = logging.getLogger(__name__)
 
 # Actions go to the Fermax cloud one at a time
 PARALLEL_UPDATES = 1
@@ -189,12 +186,10 @@ class FermaxCamera(FermaxBlueEntity, Camera):
 
     async def async_turn_on(self) -> None:
         """Start live camera stream via auto-on + mediasoup."""
-        result = await self.coordinator.start_camera_preview()
-        if not result:
+        if not await self.coordinator.request_camera_preview():
             raise HomeAssistantError(
                 translation_domain=DOMAIN, translation_key="camera_preview_failed"
             )
-        _LOGGER.info("Camera auto-on started: %s", result.description)
 
     async def async_turn_off(self) -> None:
         """Stop live camera stream."""

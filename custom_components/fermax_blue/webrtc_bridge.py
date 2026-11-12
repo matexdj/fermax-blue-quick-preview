@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import io
 import logging
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -171,10 +172,12 @@ def _create_switchable_video_track(
             # (source pts, our pts) at the first live packet: the live timeline
             # continues where the placeholder left off
             self._origin: tuple[int, int] | None = None
+            self._first_live_item = False
 
         def set_source(self, track: Any) -> None:
             self._source = track
             self._origin = None
+            self._first_live_item = True
 
         async def recv(self) -> Any:
             if self._source:
@@ -189,6 +192,9 @@ def _create_switchable_video_track(
                             self._origin = (item.pts, self._pts)
                         item.pts = self._origin[1] + item.pts - self._origin[0]
                         self._pts = item.pts + 90000 // PLACEHOLDER_FPS
+                    if self._first_live_item:
+                        self._first_live_item = False
+                        _LOGGER.debug("Video timing bridge_first_live_item at=%.3fs", time.monotonic())
                     return item
             await asyncio.sleep(1 / PLACEHOLDER_FPS)
             if self._still:
@@ -289,6 +295,8 @@ class WebRtcPeer:
                     continue
                 data = msg.json()
                 if data.get("type") == "webrtc/offer":
+                    offered_at = time.monotonic()
+                    _LOGGER.debug("Video timing bridge_offer at=%.3fs", offered_at)
                     await pc.setRemoteDescription(
                         RTCSessionDescription(sdp=data["value"], type="offer")
                     )
@@ -300,6 +308,10 @@ class WebRtcPeer:
                     pc.addTrack(self._audio)
                     await pc.setLocalDescription(await pc.createAnswer())
                     await ws.send_json({"type": "webrtc/answer", "value": pc.localDescription.sdp})
+                    _LOGGER.debug(
+                        "Video timing bridge_answer at=%.3fs elapsed=%.3fs",
+                        time.monotonic(), time.monotonic() - offered_at,
+                    )
                     self._tasks.append(asyncio.create_task(self._attach_session()))
                 elif data.get("type") == "webrtc/candidate" and data.get("value"):
                     candidate = candidate_from_sdp(str(data["value"]).removeprefix("candidate:"))
@@ -329,7 +341,9 @@ class WebRtcPeer:
         await self._route_microphone()
         while not self._closed:
             await asyncio.sleep(SESSION_POLL_SECONDS)
-            if session.is_active:
+            if session.can_view_video:
+                if self._mic_ready and not self._mic_routed:
+                    await self._route_microphone()
                 continue
             # The call ends on its own, as in the app. The viewer keeps the
             # last frame; closing the peer instead would make go2rtc redial and
@@ -347,6 +361,7 @@ class WebRtcPeer:
     def _attach(self, session: FermaxStreamSession) -> None:
         """Switch the tracks to a live session."""
         self._session = session
+        _LOGGER.debug("Video timing bridge_session_attached at=%.3fs", time.monotonic())
         # The panel's own H264 costs nothing to forward; re-encoding is the fallback
         video = session.subscribe_encoded_video() or session.subscribe_video()
         if video is not None:
@@ -358,7 +373,7 @@ class WebRtcPeer:
         while not self._closed:
             await asyncio.sleep(SESSION_POLL_SECONDS)
             session = self._coordinator.stream_session
-            if session is not None and session is not previous and session.is_active:
+            if session is not None and session is not previous and session.can_view_video:
                 return session
         return None
 
@@ -375,7 +390,11 @@ class WebRtcPeer:
 
     async def _route_microphone(self) -> None:
         """Answer the call and feed the microphone to the panel, once both are ready."""
-        if not (self._session and self._mic_ready) or self._mic_routed or self._closed:
+        if (
+            not (self._session and self._session.is_active and self._mic_ready)
+            or self._mic_routed
+            or self._closed
+        ):
             return
         self._mic_routed = True
         if not await self._coordinator.pickup():

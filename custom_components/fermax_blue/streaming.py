@@ -592,7 +592,10 @@ class FermaxSignalingClient:
                 self._on_end_up(code)
 
         try:
+            started_at = time.monotonic()
             await self._sio.connect(self._signaling_url, transports=["websocket"])
+            connected_at = time.monotonic()
+            _LOGGER.debug("Video timing socket_connected elapsed=%.3fs", connected_at - started_at)
 
             response = await self._sio.call(
                 "join_call",
@@ -609,6 +612,7 @@ class FermaxSignalingClient:
                 _LOGGER.error("join_call failed: %s", response)
                 return None
 
+            _LOGGER.debug("Video timing room_joined elapsed=%.3fs", time.monotonic() - connected_at)
             result_data = response.get("result", {})
             if not result_data:
                 return None
@@ -822,6 +826,7 @@ class FermaxStreamSession:
         media_root: str = "/media",
         receive_only: bool = False,
         full_decode: Callable[[], bool] | None = None,
+        defer_remote_audio: bool = False,
     ) -> None:
         # Enforce secure scheme for signaling URL
         if signaling_url and not signaling_url.startswith(("https://", "wss://")):
@@ -857,6 +862,8 @@ class FermaxStreamSession:
         self._room: Any = None
         self._recording_path: str | None = None
         self._audio_task: asyncio.Task[None] | None = None
+        self._audio_setup_task: asyncio.Task[None] | None = None
+        self._defer_remote_audio = defer_remote_audio
         self._relay: Any = None
         self._switchable_track: Any = None
         self._audio_sinks: list[Any] = []
@@ -864,6 +871,8 @@ class FermaxStreamSession:
         self._clock_first: int | None = None
         self._clock_scale: int | None = None
         self._encoded_tapped = False
+        self._first_keyframe_seen = False
+        self._preview_video_ready = False
         self._stopping = False
         # Whether every frame must be decoded (an MJPEG viewer is watching);
         # otherwise only keyframes are, for the stills and the snapshot
@@ -879,6 +888,11 @@ class FermaxStreamSession:
     @property
     def is_active(self) -> bool:
         return self._active
+
+    @property
+    def can_view_video(self) -> bool:
+        """Whether WebRTC can attach to this session's video."""
+        return not self._stopping and (self._active or self._preview_video_ready)
 
     @property
     def latest_frame(self) -> bytes | None:
@@ -933,6 +947,9 @@ class FermaxStreamSession:
         """Route one access unit: recording, WebRTC viewers, and whether to decode it."""
         timestamp = self._to_90khz(timestamp)
         keyframe = 5 in _nal_types(data)
+        if keyframe and not self._first_keyframe_seen:
+            self._first_keyframe_seen = True
+            _LOGGER.debug("Video timing first_h264_keyframe at=%.3fs", time.monotonic())
         recording = getattr(self, "_recording_video", None)
         if recording is not None and (recording or keyframe):
             if not recording:
@@ -1038,6 +1055,7 @@ class FermaxStreamSession:
             _patch_pymediasoup_audio_channels()
             _PYMEDIASOUP_PATCHED = True
 
+        started_at = time.monotonic()
         # 1. Signaling: join room
         room = await self._signaling.connect(self._room_id)
         if not room:
@@ -1052,9 +1070,14 @@ class FermaxStreamSession:
         self._signaling._on_end_up = _handle_end_up
 
         # 2. Create mediasoup Device (audio channels patch applied at module level)
+        device_started_at = time.monotonic()
         self._device = Device(handlerFactory=AiortcHandler.createFactory(tracks=[]))
         router_caps = json.loads(room.router_rtp_capabilities)
         await self._device.load(RtpCapabilities(**router_caps))
+        _LOGGER.debug(
+            "Video timing video_device_loaded elapsed=%.3fs",
+            time.monotonic() - device_started_at,
+        )
 
         # 3. Create RecvTransport for video
         video_tp = room.recv_video_transport
@@ -1067,22 +1090,37 @@ class FermaxStreamSession:
             iceParameters=IceParameters(**ice_params),
             iceCandidates=[IceCandidate(**c) for c in ice_candidates],
             dtlsParameters=DtlsParameters(**dtls_params),
+            # Autoon can try direct ICE with the candidates supplied by Fermax.
+            iceServers=[] if self._defer_remote_audio else None,
         )
 
         # Handle transport connect callback
         @self._recv_transport.on("connect")  # type: ignore[untyped-decorator]
         async def on_connect(dtls_parameters: DtlsParameters) -> None:
-            await self._signaling.connect_transport(
+            connect_started_at = time.monotonic()
+            _LOGGER.debug("Video timing video_connect_requested at=%.3fs", connect_started_at)
+            connected = await self._signaling.connect_transport(
                 transport_id=video_tp.id,
                 dtls_parameters=json.dumps(dtls_parameters.dict(exclude_none=True)),
+            )
+            _LOGGER.debug(
+                "Video timing video_connect_returned at=%.3fs elapsed=%.3fs success=%s",
+                time.monotonic(), time.monotonic() - connect_started_at, connected,
             )
 
         # 4. Consume video from SFU
         device_caps = self._device.rtpCapabilities
+        consume_requested_at = time.monotonic()
         consume_result = await self._signaling.consume_transport(
             transport_id=video_tp.id,
             producer_id=room.video_producer_id,
             rtp_capabilities=json.dumps(device_caps.dict(exclude_none=True)),
+        )
+        consume_returned_at = time.monotonic()
+        _LOGGER.debug(
+            "Video timing video_consume_returned at=%.3fs elapsed=%.3fs success=%s",
+            consume_returned_at, consume_returned_at - consume_requested_at,
+            bool(consume_result),
         )
         if not consume_result:
             _LOGGER.error("Failed to consume video")
@@ -1096,10 +1134,19 @@ class FermaxStreamSession:
             if isinstance(consume_result.rtp_parameters, dict)
             else consume_result.rtp_parameters,
         )
+        _LOGGER.debug(
+            "Video timing video_local_consumer_ready elapsed=%.3fs",
+            time.monotonic() - consume_returned_at,
+        )
+        _LOGGER.debug(
+            "Video timing video_transport_ready at=%.3fs elapsed=%.3fs",
+            time.monotonic(), time.monotonic() - started_at,
+        )
         _tune_udp_sockets(self._recv_transport)
         self._encoded_tapped = _tap_encoded_video(
             self._recv_transport, self._consumer.track, self._forward_encoded
         )
+        _LOGGER.debug("Video timing encoded_tap_ready enabled=%s", self._encoded_tapped)
         # Fan-out: the frame grabber, the recorder and any WebRTC viewer read
         # the same consumer tracks through relay proxies
         from aiortc.contrib.media import MediaRelay
@@ -1151,6 +1198,38 @@ class FermaxStreamSession:
                 dtls_parameters=json.dumps(dtls_parameters.dict(exclude_none=True)),
             )
 
+        async def consume_remote_audio(producer_id: str) -> None:
+            if not self._recv_audio_transport or not self._audio_tp:
+                return
+            audio_consume = await self._signaling.consume_transport(
+                transport_id=self._audio_tp.id,
+                producer_id=producer_id,
+                rtp_capabilities=json.dumps(device_caps.dict(exclude_none=True)),
+            )
+            if not audio_consume:
+                return
+            self._audio_consumer = await self._recv_audio_transport.consume(
+                id=audio_consume.consumer_id,
+                producerId=audio_consume.producer_id,
+                kind=audio_consume.kind,
+                rtpParameters=RtpParameters(**audio_consume.rtp_parameters)
+                if isinstance(audio_consume.rtp_parameters, dict)
+                else audio_consume.rtp_parameters,
+            )
+            _LOGGER.info("Audio consumer created after pickup")
+            _LOGGER.debug("Video timing remote_audio_ready at=%.3fs", time.monotonic())
+            _tune_udp_sockets(self._recv_audio_transport)
+            self._attach_audio_sinks()
+
+        async def finish_remote_audio(producer_id: str) -> None:
+            try:
+                await consume_remote_audio(producer_id)
+            except Exception:
+                _LOGGER.warning("Could not connect preview audio", exc_info=True)
+                return
+            if self._active and self._audio_consumer and self._audio_task is None:
+                self._audio_task = asyncio.create_task(self._grab_audio())
+
         @self._send_transport.on("produce")  # type: ignore[untyped-decorator]
         async def on_produce(
             kind: str,
@@ -1179,24 +1258,15 @@ class FermaxStreamSession:
 
             # After pickup ACK: consume remote audio (matching APK sequence)
             remote_audio_id = pickup_result.get("consumer", {}).get("producerId", "")
-            if remote_audio_id and self._recv_audio_transport and self._audio_tp:
-                audio_consume = await self._signaling.consume_transport(
-                    transport_id=self._audio_tp.id,
-                    producer_id=remote_audio_id,
-                    rtp_capabilities=json.dumps(device_caps.dict(exclude_none=True)),
-                )
-                if audio_consume:
-                    self._audio_consumer = await self._recv_audio_transport.consume(
-                        id=audio_consume.consumer_id,
-                        producerId=audio_consume.producer_id,
-                        kind=audio_consume.kind,
-                        rtpParameters=RtpParameters(**audio_consume.rtp_parameters)
-                        if isinstance(audio_consume.rtp_parameters, dict)
-                        else audio_consume.rtp_parameters,
+            if remote_audio_id:
+                if self._defer_remote_audio:
+                    # Manual preview can show video once pickup is accepted.
+                    # Its audio track sends silence while the consumer connects.
+                    self._audio_setup_task = asyncio.create_task(
+                        finish_remote_audio(remote_audio_id)
                     )
-                    _LOGGER.info("Audio consumer created after pickup")
-                    _tune_udp_sockets(self._recv_audio_transport)
-                    self._attach_audio_sinks()
+                else:
+                    await consume_remote_audio(remote_audio_id)
 
             return str(our_producer_id)
 
@@ -1206,14 +1276,33 @@ class FermaxStreamSession:
         # app's preview screen before attending).
         if self._receive_only:
             _LOGGER.info("Receive-only session, skipping pickup")
-        elif not await self.pickup():
-            return False
+        else:
+            pickup_at = time.monotonic()
+            # Only Autoon uses this path. Encoded video can be forwarded while
+            # pickup runs, without activating the call or the recorder early.
+            self._preview_video_ready = self._defer_remote_audio and self._encoded_tapped
+            picked_up = await self.pickup()
+            _LOGGER.debug(
+                "Video timing pickup_returned elapsed=%.3fs success=%s",
+                time.monotonic() - pickup_at, picked_up,
+            )
+            if not picked_up:
+                if self._preview_video_ready or self._audio_setup_task is not None:
+                    await self.stop()
+                return False
 
+        if self._stopping:
+            return False
         # 8. Initialize recording (frames collected in _grab_frames)
+        recording_at = time.monotonic()
         await self._init_recording()
+        _LOGGER.debug("Video timing recording_initialized elapsed=%.3fs", time.monotonic() - recording_at)
 
         # 9. Start frame grabber + audio recorder
+        if self._stopping:
+            return False
         self._active = True
+        self._preview_video_ready = False
         self._frame_task = asyncio.create_task(self._grab_frames())
         if self._audio_consumer:
             self._audio_task = asyncio.create_task(self._grab_audio())
@@ -1393,6 +1482,8 @@ class FermaxStreamSession:
             while self._active:
                 frame = await track.recv()
                 frame_count += 1
+                if frame_count == 1:
+                    _LOGGER.debug("Video timing first_decoded_frame at=%.3fs", time.monotonic())
                 raw_jpeg, display_jpeg = await asyncio.to_thread(self._encode_jpegs, frame)
 
                 # Without the encoded video, the recording is built from these frames
@@ -1408,6 +1499,7 @@ class FermaxStreamSession:
                 self._last_raw_frame = raw_jpeg
                 self._latest_frame = display_jpeg
                 if frame_count == 1:
+                    _LOGGER.debug("Video timing first_jpeg at=%.3fs", time.monotonic())
                     _LOGGER.info("First frame received: %d bytes", len(self._latest_frame))
                 elif frame_count % 100 == 0:
                     _LOGGER.debug("Frame %d received", frame_count)
@@ -1433,6 +1525,12 @@ class FermaxStreamSession:
             return
         self._stopping = True
         self._active = False
+
+        if self._audio_setup_task and not self._audio_setup_task.done():
+            self._audio_setup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._audio_setup_task
+        self._audio_setup_task = None
 
         if self._frame_task and not self._frame_task.done():
             self._frame_task.cancel()

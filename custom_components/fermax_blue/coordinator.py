@@ -119,6 +119,8 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         self._doorbell_ringing: bool = False
         self._camera_active: bool = False
         self._wake_lock = asyncio.Lock()
+        self._preview_request_task: asyncio.Task[Any] | None = None
+        self._push_stream_task: asyncio.Task[Any] | None = None
         # (stage, monotonic time it was reached); stage "failed" or a WAKE_STAGES key
         self._wake: tuple[str, float] | None = None
 
@@ -147,10 +149,10 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         # Set while push registration is failing: when the watchdog tries again
         self._push_retry_at: float | None = None
 
-    def _background(self, target: Coroutine[Any, Any, Any], name: str) -> None:
+    def _background(self, target: Coroutine[Any, Any, Any], name: str) -> asyncio.Task[Any]:
         """Run a task tied to the entry: unloading it cancels the task."""
         assert self.config_entry is not None
-        self.config_entry.async_create_background_task(
+        return self.config_entry.async_create_background_task(
             self.hass, target, f"{DOMAIN} {name}", eager_start=False
         )
 
@@ -545,6 +547,13 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         is_call = notification_type in ("Call", "CallAttend", "CallEnd")
         self._background(self.api.ack_notification(fcm_message_id, is_call=is_call), "push ack")
 
+        if notification_type in ("Call", "Autoon", "ChangeVideoSource"):
+            _LOGGER.debug(
+                "Video timing push at=%.3fs type=%s mode=%s preview=%s has_room=%s",
+                time.monotonic(), notification_type, self._call_mode,
+                self._ring_preview, bool(data.get("RoomId")),
+            )
+
         # Start video stream based on call mode:
         # - Autoon (camera preview button): always start stream
         # - ChangeVideoSource (switch camera): the panel tears the current room
@@ -570,7 +579,7 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
                 socket_url = DEFAULT_SIGNALING_URL
             fermax_token = data.get("FermaxToken", "")
             receive_only = notification_type == "Call" and not attend
-            self._background(
+            self._push_stream_task = self._background(
                 self._start_stream(
                     room_id,
                     socket_url,
@@ -578,6 +587,7 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
                     receive_only=receive_only,
                     preview_timeout=data.get("PreviewTimeout"),
                     conversation_timeout=data.get("ConversationTimeout"),
+                    defer_remote_audio=notification_type == "Autoon",
                 ),
                 "stream start",
             )
@@ -601,6 +611,8 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
                 SIGNAL_DOORBELL_RING.format(self.pairing.device_id),
                 data.get("AccessDoorKey"),
             )
+
+            _LOGGER.debug("Video timing doorbell_dispatched at=%.3fs", time.monotonic())
 
             # Cancel previous reset timer if still pending
             if self._doorbell_reset_unsub:
@@ -663,6 +675,31 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
 
         return success
 
+    async def request_camera_preview(self) -> bool:
+        """Reuse a running or pending preview before requesting another wake."""
+        session = self._stream_session
+        push_task = self._push_stream_task
+        if (session and session.can_view_video) or (push_task and not push_task.done()):
+            _LOGGER.debug("Video timing preview_reused_session at=%.3fs", time.monotonic())
+            return True
+
+        request = self._preview_request_task
+        if request is None or request.done():
+            if (
+                self._camera_active
+                and self._wake is not None
+                and self._wake[0] == "accepted"
+                and time.monotonic() - self._wake[1] < WEBRTC_START_TIMEOUT
+            ):
+                _LOGGER.debug("Video timing preview_waiting_for_push at=%.3fs", time.monotonic())
+                return True
+            request = self._preview_request_task = self._background(
+                self.start_camera_preview(), "camera wake"
+            )
+        else:
+            _LOGGER.debug("Video timing preview_shared_request at=%.3fs", time.monotonic())
+        return bool(await asyncio.shield(request))
+
     async def start_camera_preview(self) -> DivertResponse | None:
         """Start camera preview (auto-on) to view the intercom camera."""
         if not self.notification_listener or not self.notification_listener.fcm_token:
@@ -673,10 +710,16 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         # to the street panel on the unit's behalf, as for its doors (#165)
         panel_id = self._preview_panel_id()
         self._set_wake("request")
+        requested_at = time.monotonic()
+        _LOGGER.debug("Video timing auto_on_requested at=%.3fs", requested_at)
         result = await self.api.auto_on(
             panel_id or self.pairing.device_id,
             self.notification_listener.fcm_token,
             self.pairing.device_id if panel_id else None,
+        )
+        _LOGGER.debug(
+            "Video timing auto_on_returned at=%.3fs elapsed=%.3fs accepted=%s",
+            time.monotonic(), time.monotonic() - requested_at, bool(result),
         )
         # The push may already have started the session while auto-on answered
         if self._wake and self._wake[0] == "request":
@@ -814,12 +857,18 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         receive_only: bool = False,
         preview_timeout: str | int | None = None,
         conversation_timeout: str | int | None = None,
+        defer_remote_audio: bool = False,
     ) -> None:
         """Start a video stream session for the given room."""
+        started_at = time.monotonic()
         self._conversation_timeout = _positive_int(
             conversation_timeout, DEFAULT_CONVERSATION_TIMEOUT
         )
         await self.stop_stream()
+        _LOGGER.debug(
+            "Video timing previous_stream_stopped elapsed=%.3fs",
+            time.monotonic() - started_at,
+        )
 
         if not self.notification_listener:
             return
@@ -828,6 +877,11 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
             return
         self._set_wake("joining")
         oauth_token = fermax_token or await self.api.get_access_token()
+
+        _LOGGER.debug(
+            "Video timing session_start at=%.3fs elapsed_from_task=%.3fs receive_only=%s",
+            time.monotonic(), time.monotonic() - started_at, receive_only,
+        )
 
         @callback
         def _on_stream_end() -> None:
@@ -853,6 +907,7 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
             media_root=media_root,
             receive_only=receive_only,
             full_decode=lambda: self.mjpeg_clients > 0,
+            defer_remote_audio=defer_remote_audio,
         )
 
         success = await session.start()
@@ -861,6 +916,7 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
             return
         self._set_wake(None if success else "failed")
         if success:
+            _LOGGER.debug("Video timing stream_active at=%.3fs", time.monotonic())
             self._camera_active = True
             _LOGGER.info("Video stream started for room %s", room_id)
             self.async_set_updated_data(self.data)
@@ -919,16 +975,31 @@ class FermaxBlueCoordinator(DataUpdateCoordinator):
         # One wake-up at a time: a second auto-on while the first is pending
         # answers 409, and its push would replace the session being started
         async with self._wake_lock:
-            if self.has_active_stream:
-                return self._stream_session
-            # _camera_active is set by a preview request whose push has not landed yet
-            if not self._camera_active and not await self.start_camera_preview():
+            session = self._stream_session
+            if session and session.can_view_video:
+                return session
+            # A push queues its stream before dispatching the doorbell event.
+            # A viewer opened by that event should join the pending room.
+            push_task = self._push_stream_task
+            push_pending = push_task is not None and not push_task.done()
+            if push_pending:
+                _LOGGER.debug("Video timing viewer_waiting_for_push_room at=%.3fs", time.monotonic())
+            elif not await self.request_camera_preview():
                 return None
             deadline = time.monotonic() + WEBRTC_START_TIMEOUT
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.1)
-                if self.has_active_stream:
-                    return self._stream_session
+                session = self._stream_session
+                if session and session.can_view_video:
+                    return session
+                if (
+                    push_pending
+                    and not self._camera_active
+                    and self._push_stream_task is not None
+                    and self._push_stream_task.done()
+                ):
+                    _LOGGER.debug("Video timing push_room_ended_without_active_stream")
+                    return None
             _LOGGER.warning("Intercom did not start a stream within %ss", WEBRTC_START_TIMEOUT)
             self._set_wake("failed")
             return None

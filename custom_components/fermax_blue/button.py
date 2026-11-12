@@ -79,12 +79,10 @@ class FermaxCameraPreviewButton(FermaxBlueEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Start camera preview."""
-        result = await self.coordinator.start_camera_preview()
-        if not result:
+        if not await self.coordinator.request_camera_preview():
             raise HomeAssistantError(
                 translation_domain=DOMAIN, translation_key="camera_preview_failed"
             )
-        _LOGGER.info("Camera preview started: %s", result.description)
 
 
 class FermaxF1Button(FermaxBlueEntity, ButtonEntity):
