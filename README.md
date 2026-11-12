@@ -1,5 +1,7 @@
 # Fermax Blue – Quick Preview (fork by matexdj)
 
+> **See who’s at the door sooner.** On a Fermax VEO WiFi, the live image appeared in **about 4 seconds** when opening Quick Preview from idle in Home Assistant’s native camera viewer. After a physical doorbell ring, the live image in the answer-and-talk view appeared in **about 9 seconds** in the maintainer’s testing. These are times to visible live video from one installation. Actual times depend on the viewer and network.
+
 > **Quick preview fork** · This branch is based on upstream v1.0.0. See the [Quick preview guide](docs/quick-preview.md) for installation, testing, dashboard setup, and rollback. The Marketplace instructions below install the upstream project. The original project’s support link below belongs to its maintainer.
 
 If you’d like to support the work on this fork, you can [☕ Buy matexdj a coffee](https://buymeacoffee.com/matexdj).
