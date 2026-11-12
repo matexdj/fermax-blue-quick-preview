@@ -1,5 +1,7 @@
 # Fermax Blue for Home Assistant
 
+If you’d like to support the work on this fork, you can [☕ Buy matexdj a coffee](https://buymeacoffee.com/matexdj).
+
 [![Marketplace](https://img.shields.io/badge/Marketplace-Default-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/)
 [![GitHub Release](https://img.shields.io/github/release/bvis/fermax-blue-hass.svg)](https://github.com/bvis/fermax-blue-hass/releases)
 [![Tests](https://github.com/bvis/fermax-blue-hass/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/bvis/fermax-blue-hass/actions/workflows/tests.yml)
