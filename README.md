@@ -1,4 +1,4 @@
-# Fermax Blue for Home Assistant
+# Fermax Blue – Quick Preview (fork by matexdj)
 
 If you’d like to support the work on this fork, you can [☕ Buy matexdj a coffee](https://buymeacoffee.com/matexdj).
 
