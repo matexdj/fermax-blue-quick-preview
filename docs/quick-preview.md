@@ -1,4 +1,4 @@
-# Fermax Blue for Home Assistant · Faster live preview
+# Fermax Blue – Quick Preview installation guide
 
 An experimental fork of [bvis/fermax-blue-hass](https://github.com/bvis/fermax-blue-hass), based on [v1.0.0](https://github.com/bvis/fermax-blue-hass/tree/v1.0.0).
 
@@ -13,7 +13,7 @@ This configuration was tested with a Fermax VEO WiFi. The native Home Assistant 
 ## Install this branch manually
 
 1. Back up your current `custom_components/fermax_blue` directory.
-2. Select the `quick-preview-v1.0.0` branch on GitHub, then choose **Code → Download ZIP** and extract it. The changes are already included in this branch.
+2. Open the [`quick-preview-v1.0.0` branch](https://github.com/matexdj/fermax-blue-quick-preview/tree/quick-preview-v1.0.0), then choose **Code → Download ZIP** and extract it. The changes are already included in this branch.
 3. Copy the resulting `custom_components/fermax_blue` directory from the extracted ZIP into your Home Assistant configuration directory. Keep your existing integration entry.
 4. Restart Home Assistant. From idle, check live video and audio, then try again over mobile data if you use remote access. Ring the physical doorbell and check the notification, conversation, door release and recording playback.
 
