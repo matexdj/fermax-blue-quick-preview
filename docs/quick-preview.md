@@ -8,7 +8,7 @@ An experimental fork of [bvis/fermax-blue-hass](https://github.com/bvis/fermax-b
 - During a manual preview, the viewer can receive H.264 video while Fermax finishes accepting the session. Incoming audio connects in the background.
 - The manual-preview video receiver uses the ICE candidates announced by Fermax without querying aiortc’s default STUN server. The call flow, audio transports and viewer-side ICE configuration keep their upstream settings.
 
-This configuration was tested with a Fermax VEO WiFi. The native Home Assistant camera viewer showed movement after about **4 seconds** on a PC and on a phone using mobile data when opened from the device page. The embedded dashboard viewer took about **8 seconds** after the accumulated changes. These are observations from one installation. The viewer, network and starting state affect the result.
+This configuration was tested with a Fermax VEO WiFi. The native Home Assistant camera viewer showed movement after about **4 seconds** on a PC and on a phone using mobile data when opened from the device page. The embedded dashboard viewer took about **8 seconds** after the accumulated changes. After a physical doorbell ring, the live image in the answer-and-talk view appeared in about **9 seconds**. These are observations from one installation and measure time to visible live video. The viewer, network and starting state affect the result.
 
 ## Install this branch manually
 
