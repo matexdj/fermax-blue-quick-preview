@@ -1,6 +1,8 @@
-# Fermax Blue for Home Assistant
+# Fermax Blue – Quick Preview (fork by matexdj)
 
 > **Quick preview fork** · This branch is based on upstream v1.0.0. See the [Quick preview guide](docs/quick-preview.md) for installation, testing, dashboard setup, and rollback. The Marketplace instructions below install the upstream project. The original project’s support link below belongs to its maintainer.
+
+If you’d like to support the work on this fork, you can [☕ Buy matexdj a coffee](https://buymeacoffee.com/matexdj).
 
 [![Marketplace](https://img.shields.io/badge/Marketplace-Default-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace/)
 [![GitHub Release](https://img.shields.io/github/release/bvis/fermax-blue-hass.svg)](https://github.com/bvis/fermax-blue-hass/releases)
