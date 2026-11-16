@@ -42,6 +42,28 @@ flowchart LR
 
 Opening the viewer can wake the camera. For two-way talk, use your existing conversation card. The dashboard button is configured separately in Home Assistant.
 
+## Hear the intercom when opening the camera
+
+If your WebRTC Camera card starts muted even with `muted: false`, you can use [Advanced Camera Card](https://github.com/dermotduffy/advanced-camera-card) with its WebRTC Camera provider and automatic speaker unmute. This is a dashboard configuration tested in a desktop browser and the Home Assistant mobile app. Playback with sound can still depend on the browser or app.
+
+In the **Videoportero → Llamada** dashboard, we used this configuration for the listening card inside the condition that shows it when talk mode is off. Keep your existing **View camera** button that wakes the intercom. Replace the example camera entity with yours.
+
+```yaml
+type: custom:advanced-camera-card
+cameras:
+  - camera_entity: camera.example_visitor
+    live_provider: webrtc-card
+    webrtc_card:
+      entity: camera.example_visitor
+      mode: webrtc
+      media: video,audio
+live:
+  auto_unmute: [selected, visible]
+  auto_mute: [hidden]
+```
+
+The card plays incoming audio. Use your existing **Talk** control when you want to speak. From idle, press **View camera** and check that you can hear the street as soon as live video appears, without pressing the speaker icon. Repeat on desktop and in the Companion App. To undo the dashboard change, restore the previous listening card configuration.
+
 ## Rollback and updates
 
 Restore your backed-up integration directory and restart Home Assistant. Keep your existing Home Assistant configuration entry. Never include credentials, tokens, or private recordings in a public issue. HACS can overwrite locally patched files when it updates the integration. To move to another upstream version, review and test the patch against that version before replacing the installed files.
